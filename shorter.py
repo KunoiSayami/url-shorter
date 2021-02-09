@@ -21,6 +21,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from typing import Union
 
 
 import aioredis
@@ -86,12 +87,9 @@ class Server:
         return web.HTTPBadRequest()
 
     async def handle_create_link(self, request: web.Request) -> web.Response:
-        bearer = request.headers.get('Authorization')
         # Authorization: Bearer user_id:auth_string
-        if bearer is None:
-            return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized request %s %s', request)
-        if not await self.redis.sismember('us_auth', bearer := bearer.split(maxsplit=1)[1]):
-            return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized key %s %s', request)
+        if not isinstance(bearer := await self.verify_identify(request), str):
+            return bearer
         data = await request.post()
         if not (url := data.get('url')):
             return self.log_and_return(
@@ -108,11 +106,35 @@ class Server:
                      request.path)
         return return_value
 
+    async def verify_identify(self, request: web.Request) -> Union[str, web.Response]:
+        if not (bearer := request.headers.get('authorization')):
+            return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized request %s %s', request)
+        if not await self.redis.sismember('us_auth', bearer := bearer.split(maxsplit=1)[1]):
+            return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized key %s %s', request)
+        return bearer
+
     async def handle_delete_link(self, request: web.Request) -> web.Response:
-        pass
+        if not isinstance(bearer := await self.verify_identify(request), str):
+            return bearer
+        data = await request.post()
+        if not (url := data.get('url')):
+            return self.log_and_return(
+                web.HTTPBadRequest(reason='Post format unexpected'),
+                'Deny bad format %s %s',
+                request)
+        if rt := await self.url_conn.delete_url(url, int(bearer.split(':')[0])):
+            if rt == UrlDatabase.StatusCode.NotOwner:
+                return web.json_response(dict(text='Url is not your own created', code=1), status=400)
+            elif rt == UrlDatabase.StatusCode.NotFound:
+                return web.json_response(dict(text='Url not found', code=2), status=404)
+            return web.HTTPBadRequest()
+        return web.HTTPNoContent(content_type='text/html')
 
     async def handle_revoke_key(self, request: web.Request) -> web.Response:
-        pass
+        if not isinstance(bearer := await self.verify_identify(request), str):
+            return bearer
+        new_key = await self.url_conn.update_authorized_key(int(bearer.split(':')[0]))
+        return web.json_response(dict(key=new_key))
 
     async def handle_help_page(self, request: web.Request) -> web.Response:
         pass

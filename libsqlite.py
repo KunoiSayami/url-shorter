@@ -124,6 +124,14 @@ class UrlDatabase(SqliteBase):
             await db.commit()
             return s
 
+    async def update_authorized_key(self, user_id: int) -> str:
+        async with self.lock, aiosqlite.connect(self.file_name) as db:
+            s = hashlib.sha256(f'{user_id}{random.random()}'.encode()).hexdigest()
+            async with db.execute('''UPDATE "users" SET "string" = ? WHERE "id" = ?''', (s, user_id)):
+                pass
+            await db.commit()
+            return s
+
     async def delete_user(self, user_id: int) -> None:
         async with self.lock, aiosqlite.connect(self.file_name) as db:
             async with db.execute('''DELETE FROM "users" WHERE "id" = ?''', (user_id,)):
@@ -144,19 +152,21 @@ class UrlDatabase(SqliteBase):
             async with db.execute('''INSERT INTO "mapper" VALUES (?, ?, ?, ?)''',
                                   (r, from_user, original_url, int(time.time()))):
                 pass
+            await db.commit()
             return r
 
-    async def delete_url(self, target_url: str, from_user: int) -> Optional[StatusCode]:
+    async def delete_url(self, short_url: str, from_user: int) -> Optional[StatusCode]:
         async with self.lock, aiosqlite.connect(self.file_name) as db:
-            async with db.execute('''SELECT "from_user" FROM "mapper" WHERE "target_url" = ?''',
-                                  (target_url,)) as cursor:
+            async with db.execute('''SELECT "from_user" FROM "mapper" WHERE "short_url" = ?''',
+                                  (short_url,)) as cursor:
                 if not (r := await cursor.fetchone()):
                     return UrlDatabase.StatusCode.NotFound
                 if r[0] != from_user:
                     return UrlDatabase.StatusCode.NotOwner
-                async with db.execute('''DELETE FROM "mapper" WHERE "target_url" = ?''',
-                                      (target_url,)):
+                async with db.execute('''DELETE FROM "mapper" WHERE "short_url" = ?''',
+                                      (short_url,)):
                     pass
+            await db.commit()
 
     async def query_url(self, short_name: str) -> Optional[str]:
         async with self.lock, aiosqlite.connect(self.file_name) as db:
