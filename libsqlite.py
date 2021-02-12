@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # libsqlite.py
 # Copyright (C) 2021 KunoiSayami
@@ -134,12 +133,17 @@ class UrlDatabase(SqliteBase):
 
     async def delete_user(self, user_id: int) -> None:
         async with self.lock, aiosqlite.connect(self.file_name) as db:
+            async with db.execute('''SELECT "string" FROM "users" WHERE "id" = ?''', (user_id, )) as cursor:
+                if (r := await cursor.fetchone()) is None:
+                    return
+
             async with db.execute('''DELETE FROM "users" WHERE "id" = ?''', (user_id,)):
                 pass
+            return r[0]
 
     @staticmethod
     def generate_string(url: str) -> str:
-        return base62.encodebytes(hashlib.sha256(f'{url}{random.random()}').digest())[:10]
+        return base62.encodebytes(hashlib.sha256(f'{url}{random.random()}'.encode()).digest())[:10]
 
     async def insert_url(self, original_url: str, from_user: int) -> str:
         async with self.lock, aiosqlite.connect(self.file_name) as db:
@@ -147,8 +151,7 @@ class UrlDatabase(SqliteBase):
                                   (original_url, )) as cursor:
                 if r := await cursor.fetchone():
                     return r[0]
-            hash_value = hashlib.sha256(f'{original_url}{random.random()}').digest()
-            r = base62.encodebytes(hash_value)[:10]
+            r = self.generate_string(original_url)
             async with db.execute('''INSERT INTO "mapper" VALUES (?, ?, ?, ?)''',
                                   (r, from_user, original_url, int(time.time()))):
                 pass

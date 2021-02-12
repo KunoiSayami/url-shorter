@@ -22,10 +22,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import sys
 from configparser import ConfigParser
 from typing import Union
 
 import aioredis
+import aiofiles
 import coloredlogs
 # import toml
 from aiohttp import web
@@ -41,7 +43,7 @@ class Server:
     paused = False
 
     def __init__(self, redis_connection: aioredis.Redis, url_database: UrlDatabase, bind_address: str,
-                 bind_port: int) -> None:
+                 bind_port: int, *, debug: bool = False) -> None:
         self.redis = redis_connection
         self.url_conn = url_database
         self.bind_address = bind_address
@@ -49,21 +51,30 @@ class Server:
         self.website = web.Application()
         self.runner = web.AppRunner(self.website)
         self.site = None
+        self.debug_mode = debug
 
     @classmethod
     async def new(cls, redis_address: str, database_filename: str, post_database_statement: str,
-                  bind_address: str, bind_port: int) -> Server:
-        redis_connection, conn = await asyncio.gather(aioredis.create_redis_pool(redis_address),
-                                                      UrlDatabase.new(database_filename, post_database_statement))
-        return cls(redis_connection, conn, bind_address, bind_port)
+                  bind_address: str, bind_port: int, *, debug: bool = False) -> Server:
+        redis_connection, conn = await asyncio.gather(
+            aioredis.create_redis_pool(redis_address),
+            UrlDatabase.new(database_filename, post_database_statement, renew=debug)
+        )
+        await redis_connection.delete('us_auth')
+        keys = [key async for key in conn.get_all_authorized_key()]
+        if keys:
+            await redis_connection.sadd('us_auth', *keys)
+        return cls(redis_connection, conn, bind_address, bind_port, debug=debug)
 
     def init_router(self) -> None:
         self.website.add_routes([
-            web.get('/', self.handle_redirect),
-            web.get('/{url}', self.handle_redirect),
-            web.post('/', self.handle_create_link),
+            web.post('/user', self.handle_add_user),
+            web.delete('/user', self.handle_delete_user),
+            web.get('/', self.handle_help_page),
             web.delete('/{url}', self.handle_delete_link),
             web.put('/', self.handle_revoke_key),
+            web.get('/{url}', self.handle_redirect),
+            web.post('/', self.handle_create_link),
         ])
 
     async def save_query_result(self, url: str, location: str) -> None:
@@ -84,12 +95,18 @@ class Server:
         if request.headers.get('X-Real-IP', '0.0.0.0') != '127.0.0.1':
             return web.HTTPForbidden()
         if user := int((field := await request.post()).get('id', '0')):
-            r = await self.url_conn.insert_authorized_key(user, super_user=bool(field.get('super_user', 'False')))
+            r = await self.url_conn.insert_authorized_key(
+                user,
+                super_user=bool(field.get('super_user', 'false').lower())
+            )
+            await self.redis.sadd('us_auth', r)
             return web.json_response(dict(status=200, result=r))
+        if self.debug_mode:
+            logger.debug('Post user => %d', user)
         return web.HTTPBadRequest()
 
     async def handle_redirect(self, request: web.Request) -> web.Response:
-        if not (url := request.match_info.get('name')):
+        if not (url := request.match_info.get('url')):
             return await self.handle_help_page(request)
         if redis_result := await self.redis.get(f'us_{url}'):
             url = redis_result.decode()
@@ -116,16 +133,17 @@ class Server:
         return web.json_response({'location': result})
 
     @staticmethod
-    def log_and_return(return_value: web.Response, log_body: str, request: web.Request) -> web.Response:
+    def log_and_return(return_value: web.Response, log_body: str, request: web.Request, *args) -> web.Response:
         logger.error(log_body,
                      request.headers.get('X-Real-IP', request.remote),
-                     request.path)
+                     request.path,
+                     *args)
         return return_value
 
     async def verify_identify(self, request: web.Request) -> Union[str, web.Response]:
         if not (bearer := request.headers.get('authorization')):
             return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized request %s %s', request)
-        if not await self.redis.sismember('us_auth', bearer := bearer.split(maxsplit=1)[1]):
+        if not await self.redis.sismember('us_auth', (bearer := bearer.split(maxsplit=1)[1]).split(':')[1]):
             return self.log_and_return(web.HTTPForbidden(), 'Deny unauthorized key %s %s', request)
         return bearer
 
@@ -153,8 +171,12 @@ class Server:
         return web.json_response(dict(key=new_key))
 
     @staticmethod
-    async def handle_help_page(request: web.Request) -> web.Response:
-        return web.HTTPOk()
+    async def handle_help_page(_request: web.Request) -> web.Response:
+        try:
+            async with aiofiles.open('data/index.html') as fin:
+                return web.Response(body=await fin.read())
+        except FileNotFoundError:
+            raise web.HTTPNotFound()
 
     async def start(self) -> None:
         self.init_router()
@@ -171,7 +193,7 @@ class Server:
         await self.redis.wait_closed()
 
     @classmethod
-    async def load_from_configure_file(cls, file_name: str = 'data/config.ini') -> Server:
+    async def load_from_configure_file(cls, file_name: str = 'data/config.ini', *, debug: bool = False) -> Server:
         config = ConfigParser()
         config.read(file_name)
         return await cls.new(
@@ -179,7 +201,8 @@ class Server:
             config.get('database', 'filename', fallback='data/us.db'),
             config.get('database', 'post_statement', fallback=''),
             config.get('server', 'bind'),
-            config.getint('server', 'port')
+            config.getint('server', 'port'),
+            debug=debug
             )
 
     @staticmethod
@@ -195,8 +218,8 @@ class Server:
             await asyncio.sleep(0.5)
 
 
-async def main():
-    server = await Server.load_from_configure_file()
+async def main(debug: bool = False):
+    server = await Server.load_from_configure_file(debug=debug)
     await server.start()
     await server.idle()
     await server.stop()
@@ -207,4 +230,4 @@ if __name__ == '__main__':
         logging.DEBUG,
         fmt='%(asctime)s,%(msecs)03d - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
     )
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.get_event_loop().run_until_complete(main('--debug' in sys.argv))
