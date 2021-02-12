@@ -103,8 +103,8 @@ venv.bak/
 # mypy
 .mypy_cache/
 
-config.ini
 .idea/
 .vscode/
-*.db
 
+data/*
+!data/*.default

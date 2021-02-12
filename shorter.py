@@ -21,10 +21,13 @@
 from __future__ import annotations
 import asyncio
 import logging
+import signal
+from configparser import ConfigParser
 from typing import Union
 
-
 import aioredis
+import coloredlogs
+# import toml
 from aiohttp import web
 
 from libsqlite import UrlDatabase
@@ -35,6 +38,8 @@ logger.setLevel(logging.DEBUG)
 
 
 class Server:
+    paused = False
+
     def __init__(self, redis_connection: aioredis.Redis, url_database: UrlDatabase, bind_address: str,
                  bind_port: int) -> None:
         self.redis = redis_connection
@@ -54,6 +59,7 @@ class Server:
 
     def init_router(self) -> None:
         self.website.add_routes([
+            web.get('/', self.handle_redirect),
             web.get('/{url}', self.handle_redirect),
             web.post('/', self.handle_create_link),
             web.delete('/{url}', self.handle_delete_link),
@@ -67,10 +73,20 @@ class Server:
             pass
 
     async def handle_delete_user(self, request: web.Request) -> web.Response:
-        pass
+        if request.headers.get('X-Real-IP', '0.0.0.0') != '127.0.0.1':
+            return web.HTTPForbidden()
+        if user := int((await request.post()).get('id', '0')):
+            await self.url_conn.delete_user(user)
+            return web.json_response(dict(status=200, body='ok'))
+        return web.HTTPBadRequest()
 
     async def handle_add_user(self, request: web.Request) -> web.Response:
-        pass
+        if request.headers.get('X-Real-IP', '0.0.0.0') != '127.0.0.1':
+            return web.HTTPForbidden()
+        if user := int((field := await request.post()).get('id', '0')):
+            r = await self.url_conn.insert_authorized_key(user, super_user=bool(field.get('super_user', 'False')))
+            return web.json_response(dict(status=200, result=r))
+        return web.HTTPBadRequest()
 
     async def handle_redirect(self, request: web.Request) -> web.Response:
         if not (url := request.match_info.get('name')):
@@ -136,8 +152,9 @@ class Server:
         new_key = await self.url_conn.update_authorized_key(int(bearer.split(':')[0]))
         return web.json_response(dict(key=new_key))
 
-    async def handle_help_page(self, request: web.Request) -> web.Response:
-        pass
+    @staticmethod
+    async def handle_help_page(request: web.Request) -> web.Response:
+        return web.HTTPOk()
 
     async def start(self) -> None:
         self.init_router()
@@ -147,13 +164,47 @@ class Server:
         logger.info('Server is listening on %s:%d', self.bind_address, self.bind_port)
 
     async def stop(self) -> None:
+        Server.paused = False
+        self.redis.close()
         await self.site.stop()
         await self.runner.cleanup()
+        await self.redis.wait_closed()
+
+    @classmethod
+    async def load_from_configure_file(cls, file_name: str = 'data/config.ini') -> Server:
+        config = ConfigParser()
+        config.read(file_name)
+        return await cls.new(
+            config.get('redis', 'address', fallback='redis://localhost'),
+            config.get('database', 'filename', fallback='data/us.db'),
+            config.get('database', 'post_statement', fallback=''),
+            config.get('server', 'bind'),
+            config.getint('server', 'port')
+            )
+
+    @staticmethod
+    async def idle() -> None:
+        def _bind_SIGINT(*args) -> None:
+            Server.paused = False
+        Server.paused = True
+
+        for sig in (signal.SIGINT, signal.SIGABRT, signal.SIGTERM):
+            signal.signal(sig, _bind_SIGINT)
+
+        while Server.paused:
+            await asyncio.sleep(0.5)
 
 
 async def main():
-    pass
+    server = await Server.load_from_configure_file()
+    await server.start()
+    await server.idle()
+    await server.stop()
 
 
 if __name__ == '__main__':
-    pass
+    coloredlogs.install(
+        logging.DEBUG,
+        fmt='%(asctime)s,%(msecs)03d - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
+    )
+    asyncio.get_event_loop().run_until_complete(main())

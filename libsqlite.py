@@ -58,10 +58,10 @@ _CREATE_STATEMENT = '''
         PRIMARY KEY("string")
     );
     
-    CREATE TABLE "history" {
+    CREATE TABLE "history" (
         "time"  INTEGER NOT NULL,
         "url"   TEXT NOT NULL
-    }
+    );
 '''
 
 
