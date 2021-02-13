@@ -28,7 +28,6 @@ from typing import Union
 
 import aioredis
 import aiofiles
-import coloredlogs
 # import toml
 from aiohttp import web
 
@@ -207,7 +206,7 @@ class Server:
 
     @staticmethod
     async def idle() -> None:
-        def _bind_SIGINT(*args) -> None:
+        def _bind_SIGINT(*_args) -> None:
             Server.paused = False
         Server.paused = True
 
@@ -226,8 +225,16 @@ async def main(debug: bool = False):
 
 
 if __name__ == '__main__':
-    coloredlogs.install(
-        logging.DEBUG,
-        fmt='%(asctime)s,%(msecs)03d - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
-    )
+    try:
+        import coloredlogs
+
+        coloredlogs.install(
+            logging.DEBUG,
+            fmt='%(asctime)s,%(msecs)03d - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
+        )
+    except ModuleNotFoundError:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
+        )
     asyncio.get_event_loop().run_until_complete(main('--debug' in sys.argv))
